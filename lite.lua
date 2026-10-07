@@ -1,404 +1,32 @@
 --[[
-	GEN IMPORT v2.1 — Native RBXM/RBXL + 3D Preview
-	Preview 3D Model • Full Asset Import • No Bug No Error
+	FORKT Asset Manager v3.9 PRO
+	Original + Logo Toggle + Overview + Settings + 3D Preview + Animations
 ]]
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
-local RunService = game:GetService("RunService")
 
 local LocalPlayer = Players.LocalPlayer
 
--- ============================================================
--- NATIVE RBXM/RBXL DECODER (sama seperti v2.0)
--- ============================================================
-
-local Loader = {}
-
-local function lzfDecompress(data, expectedSize)
-	local out = {}
-	local i, o = 1, 1
-	while i <= #data do
-		local ctrl = data:byte(i)
-		i += 1
-		if ctrl < 32 then
-			for j = 0, ctrl do
-				if i > #data then break end
-				out[o] = data:sub(i, i)
-				o += 1
-				i += 1
-			end
-		else
-			local len = ctrl >> 5
-			local ref = o - ((ctrl & 0x1F) << 8) - 1
-			if i > #data then break end
-			ref -= data:byte(i)
-			i += 1
-			if len == 7 then
-				len += data:byte(i)
-				i += 1
-			end
-			len += 2
-			for _ = 1, len do
-				out[o] = out[ref]
-				o += 1
-				ref += 1
-			end
-		end
+-- ====================== LOAD REIFY ======================
+local Reify
+local function LoadReify()
+	local ok, result = pcall(function()
+		return loadstring(game:HttpGet("https://raw.githubusercontent.com/malice-nz/Reify/main/main.luau"))()
+	end)
+	if ok and result then
+		Reify = result
+		return true
 	end
-	local s = table.concat(out)
-	if expectedSize then s = s:sub(1, expectedSize) end
-	return s
+	return false
 end
 
-local function readUInt32(s, pos)
-	local b1, b2, b3, b4 = s:byte(pos, pos+3)
-	return b1 + b2*256 + b3*65536 + b4*16777216
-end
-
-local function readFloat(s, pos)
-	local b1, b2, b3, b4 = s:byte(pos, pos+3)
-	local sign = (b1 & 0x80) ~= 0 and -1 or 1
-	local exp = ((b1 & 0x7F) << 1) | ((b2 & 0x80) >> 7)
-	local mant = ((b2 & 0x7F) << 16) | (b3 << 8) | b4
-	if exp == 0 then return sign * 2^-126 * (mant / 2^23) end
-	if exp == 255 then return mant == 0 and (sign * math.huge) or 0/0 end
-	return sign * 2^(exp - 127) * (1 + mant / 2^23)
-end
-
-local function readRobloxString(s, pos)
-	local len = readUInt32(s, pos)
-	pos += 4
-	if len == 0 then return "", pos end
-	local str = s:sub(pos, pos + len - 1)
-	pos += len
-	return str, pos
-end
-
-local function parseRBXM(data)
-	local magic = data:sub(1, 8)
-	local isBinary = magic:sub(1, 4) == "\x89\xFF\x0D\x0A" or magic:find("roblox")
-	if not isBinary then return nil, "Not a binary RBXM file" end
-
-	local pos = 17
-	local instances = {}
-	local classes = {}
-	local sharedStrings = {}
-
-	while pos <= #data do
-		local chunkName = data:sub(pos, pos + 3)
-		local compressed = readUInt32(data, pos + 4)
-		local uncompSize = readUInt32(data, pos + 8)
-		local compSize = readUInt32(data, pos + 12)
-		pos += 16
-
-		if chunkName == "" or compSize == 0 then break end
-		local chunkData = data:sub(pos, pos + compSize - 1)
-		pos += compSize
-		if compressed ~= 0 then
-			chunkData = lzfDecompress(chunkData, uncompSize)
-		end
-
-		if chunkName == "INST" then
-			local p = 1
-			while p <= #chunkData do
-				local className = chunkData:sub(p, p + 3)
-				if #className < 4 then break end
-				local isService = chunkData:byte(p + 4)
-				local instCount = readUInt32(chunkData, p + 5)
-				p += 9
-				local refs = {}
-				for i = 1, instCount do
-					refs[i] = readUInt32(chunkData, p)
-					p += 4
-				end
-				classes[className] = classes[className] or {}
-				for _, ref in ipairs(refs) do
-					classes[className][ref] = true
-					instances[ref] = instances[ref] or {}
-					instances[ref].ClassName = className
-					instances[ref].IsService = isService == 1
-				end
-			end
-		elseif chunkName == "PROP" then
-			local p = 1
-			while p <= #chunkData do
-				local className = chunkData:sub(p, p + 3)
-				if #className < 4 then break end
-				local propName = chunkData:sub(p + 4, p + 7)
-				local typeId = chunkData:byte(p + 8)
-				p += 9
-
-				local refCount = readUInt32(chunkData, p)
-				p += 4
-
-				if typeId == 1 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p); p += 4
-						local str, np = readRobloxString(chunkData, p); p = np
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = str
-					end
-				elseif typeId == 2 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local val = chunkData:byte(p + 4); p += 5
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = val == 1
-					end
-				elseif typeId == 3 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local val = readUInt32(chunkData, p + 4); p += 8
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = val
-					end
-				elseif typeId == 4 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local val = readFloat(chunkData, p + 4); p += 8
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = val
-					end
-				elseif typeId == 5 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local lo = readUInt32(chunkData, p + 4)
-						local hi = readUInt32(chunkData, p + 8); p += 12
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = lo + hi * 4294967296
-					end
-				elseif typeId == 6 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local scale = readFloat(chunkData, p + 4)
-						local offset = readUInt32(chunkData, p + 8); p += 12
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = UDim.new(scale, offset)
-					end
-				elseif typeId == 7 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local sX = readFloat(chunkData, p + 4)
-						local oX = readUInt32(chunkData, p + 8)
-						local sY = readFloat(chunkData, p + 12)
-						local oY = readUInt32(chunkData, p + 16); p += 20
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = UDim2.new(sX, oX, sY, oY)
-					end
-				elseif typeId == 8 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local enumVal = readUInt32(chunkData, p + 4); p += 8
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = enumVal
-					end
-				elseif typeId == 9 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local val = readUInt32(chunkData, p + 4); p += 8
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = val
-					end
-				elseif typeId == 10 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local x = readFloat(chunkData, p + 4)
-						local y = readFloat(chunkData, p + 8)
-						local z = readFloat(chunkData, p + 12); p += 16
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = Vector3.new(x, y, z)
-					end
-				elseif typeId == 11 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local x = readFloat(chunkData, p + 4)
-						local y = readFloat(chunkData, p + 8); p += 12
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = Vector2.new(x, y)
-					end
-				elseif typeId == 12 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local px = readFloat(chunkData, p + 4)
-						local py = readFloat(chunkData, p + 8)
-						local pz = readFloat(chunkData, p + 12); p += 16
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = CFrame.new(px, py, pz)
-					end
-				elseif typeId == 13 then
-					for i = 1, refCount do
-						local ref = readUInt32(chunkData, p)
-						local r = readFloat(chunkData, p + 4)
-						local g = readFloat(chunkData, p + 8)
-						local b = readFloat(chunkData, p + 12); p += 16
-						instances[ref] = instances[ref] or { ClassName = className }
-						instances[ref][propName] = Color3.new(r, g, b)
-					end
-				else
-					break
-				end
-			end
-		elseif chunkName == "PRNT" then
-			local p = 2
-			local refCount = readUInt32(chunkData, p); p += 4
-			for i = 1, refCount do
-				local childRef = readUInt32(chunkData, p)
-				local parentRef = readUInt32(chunkData, p + 4); p += 8
-				instances[childRef] = instances[childRef] or {}
-				instances[childRef].__parent = parentRef
-			end
-		elseif chunkName == "SSTR" then
-			local p = 2
-			local count = readUInt32(chunkData, p); p += 4
-			for i = 0, count - 1 do
-				local str, np = readRobloxString(chunkData, p); p = np
-				sharedStrings[i] = str
-			end
-		elseif chunkName == "END\0" then
-			break
-		end
-	end
-	return instances, classes, sharedStrings
-end
-
-local function parseRBXMX(data)
-	local instances = {}
-	local function parseAttrs(str)
-		local attrs = {}
-		for k, v in str:gmatch('([%w_]+)%s*=%s*"([^"]*)"') do attrs[k] = v end
-		return attrs
-	end
-	local stack = {}
-	for item in data:gmatch("<Item%s+([^>]*)>") do
-		local attrs = parseAttrs(item)
-		local ref = attrs.referent
-		if ref then
-			instances[ref] = instances[ref] or {}
-			instances[ref].ClassName = attrs["class"] or "Folder"
-			instances[ref].__parent = stack[#stack]
-		end
-		table.insert(stack, ref)
-	end
-	for _ in data:gmatch("</Item>") do table.remove(stack) end
-	return instances
-end
-
-local function buildInstances(data)
-	local map = {}
-	for ref, props in pairs(data) do
-		if props.ClassName then
-			local ok, inst = pcall(Instance.new, props.ClassName)
-			if not ok or not inst then inst = Instance.new("Folder") end
-			inst.Name = props.Name or props.ClassName
-			map[ref] = inst
-		end
-	end
-	for ref, props in pairs(data) do
-		local inst = map[ref]
-		if inst then
-			for k, v in pairs(props) do
-				if k ~= "ClassName" and k ~= "__parent" and k ~= "IsService" and k ~= "Name" then
-					pcall(function() inst[k] = v end)
-				end
-			end
-		end
-	end
-	for ref, props in pairs(data) do
-		local inst = map[ref]
-		if inst and props.__parent then
-			local parent = map[props.__parent]
-			if parent then pcall(function() inst.Parent = parent end) end
-		end
-	end
-	local roots = {}
-	for ref, props in pairs(data) do
-		local inst = map[ref]
-		if inst and not props.__parent and inst.Parent == nil then
-			table.insert(roots, inst)
-		end
-	end
-	return roots
-end
-
-function Loader.LoadFile(path)
-	if not readfile then return nil, "readfile not supported" end
-	local ok, data = pcall(readfile, path)
-	if not ok or not data then return nil, "Failed to read file: " .. tostring(data) end
-
-	if data:sub(1, 5) == "<roblox" or data:sub(1, 5) == "<?xml" then
-		local parsed, err = parseRBXMX(data)
-		if not parsed then return nil, "XML parse failed: " .. tostring(err) end
-		return buildInstances(parsed)
-	elseif data:sub(1, 4) == "\x89\xFF\x0D\x0A" or data:sub(1, 4) == "<robl" then
-		local parsed = parseRBXM(data)
-		if not parsed then return nil, "Binary parse failed" end
-		return buildInstances(parsed)
-	else
-		local parsed = parseRBXM(data)
-		if parsed then
-			local roots = buildInstances(parsed)
-			if #roots > 0 then return roots end
-		end
-		return nil, "Unknown format"
-	end
-end
-
-function Loader.Import(path, target)
-	target = target or workspace
-	local roots, err = Loader.LoadFile(path)
-	if not roots then
-		local fallbacks = {
-			function() return game:GetObjects(path) end,
-			function()
-				local ref = game:GetService("InsertService"):LoadLocalAsset(path)
-				return ref and {ref} or nil
-			end,
-		}
-		for _, fn in ipairs(fallbacks) do
-			local ok, res = pcall(fn)
-			if ok and res and #res > 0 then
-				for _, obj in ipairs(res) do
-					pcall(function() obj.Parent = target end)
-				end
-				return res, "fallback"
-			end
-		end
-		return nil, err or "Load failed"
-	end
-	local imported = {}
-	if #roots == 1 then
-		pcall(function() roots[1].Parent = target end)
-		table.insert(imported, roots[1])
-	else
-		local folder = Instance.new("Folder")
-		folder.Name = "Imported_" .. tick()
-		for _, root in ipairs(roots) do
-			pcall(function() root.Parent = folder end)
-			table.insert(imported, root)
-		end
-		folder.Parent = target
-	end
-	for _, root in ipairs(imported) do
-		pcall(function()
-			for _, d in ipairs(root:GetDescendants()) do
-				if d:IsA("Script") or d:IsA("LocalScript") then
-					pcall(function() d.Enabled = true end)
-				end
-			end
-		end)
-	end
-	return imported, "native"
-end
-
--- ============================================================
--- CONFIG
--- ============================================================
+-- ====================== CONFIG & UTILS ======================
 local Config = {
-	Title = "GEN IMPORT",
-	Version = "v2.1 PREVIEW",
+	Title = "FORKT ENGINE",
+	Version = "v3.9 PRO",
 	Accent = Color3.fromRGB(138, 43, 226),
 	Accent2 = Color3.fromRGB(88, 101, 242),
 	Bg = Color3.fromRGB(18, 18, 24),
@@ -413,14 +41,20 @@ local Config = {
 }
 
 local function Protect(gui)
-	if gethui then gui.Parent = gethui()
-	elseif syn and syn.protect_gui then syn.protect_gui(gui) gui.Parent = CoreGui
-	else gui.Parent = CoreGui end
+	local ok = false
+	if gethui then
+		local success, hui = pcall(gethui)
+		if success and hui then gui.Parent = hui; ok = true end
+	end
+	if not ok and syn and syn.protect_gui then
+		pcall(syn.protect_gui, gui); gui.Parent = CoreGui; ok = true
+	end
+	if not ok then gui.Parent = CoreGui end
 end
 
 local function Create(class, props)
 	local obj = Instance.new(class)
-	for k, v in pairs(props or {}) do obj[k] = v end
+	for k,v in pairs(props or {}) do obj[k] = v end
 	return obj
 end
 
@@ -430,12 +64,11 @@ local function Tween(obj, time, props, style)
 	return t
 end
 
--- ============================================================
--- SCANNER
--- ============================================================
+-- ====================== SCANNER ======================
 local function GetWorkspaceFiles()
 	local results, found = {}, {}
 	if not listfiles then return results end
+
 	local paths = {"Workspace", "./Workspace", "workspace", "", "./", "Delta/Workspace"}
 	for _, base in ipairs(paths) do
 		local ok, files = pcall(listfiles, base)
@@ -458,28 +91,17 @@ local function GetWorkspaceFiles()
 			end
 		end
 	end
-	table.sort(results, function(a, b) return a.Name:lower() < b.Name:lower() end)
+	table.sort(results, function(a,b) return a.Name:lower() < b.Name:lower() end)
 	return results
 end
 
--- ============================================================
--- 3D PREVIEW SYSTEM
--- ============================================================
+-- ====================== 3D PREVIEW SYSTEM ======================
 local PreviewSystem = {}
-
--- Preview world setup (terisolasi di luar workspace visible area)
-local previewWorld = nil
-local previewCamera = nil
-local previewModel = nil
+local previewWorld, previewCamera, previewModel
 
 local function initPreviewWorld()
 	if previewWorld then return end
-	-- Buat folder terisolasi di workspace (di bawah jauh)
-	previewWorld = Create("Folder", {
-		Name = "__GENIMPORT_PREVIEW__",
-		Parent = workspace,
-	})
-	-- Camera khusus
+	previewWorld = Create("Folder", {Name = "__FORKT_PREVIEW__", Parent = workspace})
 	previewCamera = Create("Camera", {
 		Name = "PreviewCamera",
 		CameraType = Enum.CameraType.Scriptable,
@@ -495,7 +117,6 @@ local function clearPreviewModel()
 	end
 end
 
--- Hitung bounding box seluruh model
 local function getModelBounds(model)
 	local minV, maxV
 	local function process(part)
@@ -513,62 +134,47 @@ local function getModelBounds(model)
 			cf * Vector3.new(size.X/2, size.Y/2, size.Z/2),
 		}
 		for _, c in ipairs(corners) do
-			if not minV then
-				minV = c
-				maxV = c
+			if not minV then minV = c; maxV = c
 			else
 				minV = Vector3.new(math.min(minV.X, c.X), math.min(minV.Y, c.Y), math.min(minV.Z, c.Z))
 				maxV = Vector3.new(math.max(maxV.X, c.X), math.max(maxV.Y, c.Y), math.max(maxV.Z, c.Z))
 			end
 		end
 	end
-
-	if model:IsA("BasePart") then
-		process(model)
-	else
-		for _, d in ipairs(model:GetDescendants()) do process(d) end
-	end
-
-	if not minV then
-		return Vector3.new(0, 0, 0), Vector3.new(4, 4, 4), 1
-	end
-
+	if model:IsA("BasePart") then process(model)
+	else for _, d in ipairs(model:GetDescendants()) do process(d) end end
+	if not minV then return Vector3.new(0,0,0), Vector3.new(4,4,4), 1 end
 	local center = (minV + maxV) / 2
 	local size = maxV - minV
 	local maxDim = math.max(size.X, size.Y, size.Z)
 	return center, size, maxDim
 end
 
--- Load asset untuk preview (tanpa parent ke workspace)
-function PreviewSystem.LoadModel(asset, viewport)
+function PreviewSystem.LoadModel(asset)
 	initPreviewWorld()
 	clearPreviewModel()
 
-	local roots, err = Loader.LoadFile(asset.Path)
-	if not roots or #roots == 0 then
-		return nil, err or "Load failed"
-	end
+	if not Reify then return nil, "Reify belum loaded" end
 
-	-- Bundle ke folder preview
-	local bundle = Create("Folder", {
-		Name = "PreviewBundle",
-		Parent = previewWorld,
-	})
-	for _, root in ipairs(roots) do
-		pcall(function() root.Parent = bundle end)
-	end
+	local ok, model = pcall(function()
+		local m = Reify.Load(asset.Path)
+		if m then return m end
+		error("Reify.Load returned nil")
+	end)
+
+	if not ok or not model then return nil, tostring(model) end
+
+	local bundle = Create("Folder", {Name = "PreviewBundle", Parent = previewWorld})
+	pcall(function() model.Parent = bundle end)
 	previewModel = bundle
 
-	-- Hitung bounds
 	local center, size, maxDim = getModelBounds(bundle)
 
-	-- Center model di origin (relatif ke previewWorld)
 	pcall(function()
 		for _, d in ipairs(bundle:GetDescendants()) do
 			if d:IsA("BasePart") then
 				d.CFrame = CFrame.new(-center) * d.CFrame
 				d.Anchored = true
-				-- Matikan collision agar tidak ganggu
 				d.CanCollide = false
 				d.CanTouch = false
 				d.CanQuery = false
@@ -576,26 +182,21 @@ function PreviewSystem.LoadModel(asset, viewport)
 		end
 	end)
 
-	-- Setup camera untuk viewport
-	local targetCFrame = CFrame.new()
 	return {
 		model = bundle,
-		center = Vector3.new(0, 0, 0),
+		center = Vector3.new(0,0,0),
 		size = size,
 		maxDim = maxDim,
 	}, "ok"
 end
 
-function PreviewSystem.Clear()
-	clearPreviewModel()
-end
+function PreviewSystem.Clear() clearPreviewModel() end
 
--- Attach viewport camera & orbit controls
 local previewState = {
 	active = false,
-	orbitX = 0,
+	orbitX = 45,
 	orbitY = 30,
-	distance = 10,
+	distance = 1.8,
 	autoRotate = true,
 	targetSize = 4,
 }
@@ -603,23 +204,18 @@ local previewState = {
 local function updatePreviewCamera(viewport)
 	if not previewCamera or not previewState.active then return end
 	if not viewport or not viewport.Parent then return end
-
 	local radX = math.rad(previewState.orbitX)
 	local radY = math.rad(previewState.orbitY)
-
 	local dist = previewState.distance * previewState.targetSize
 	local offset = Vector3.new(
 		math.sin(radX) * math.cos(radY) * dist,
 		math.sin(radY) * dist,
 		math.cos(radX) * math.cos(radY) * dist
 	)
-
-	previewCamera.CFrame = CFrame.new(offset + Vector3.new(0, 0, 0)) * CFrame.Angles(0, math.pi, 0)
 	pcall(function() viewport.CurrentCamera = previewCamera end)
-	previewCamera.CFrame = CFrame.lookAt(offset, Vector3.new(0, 0, 0))
+	previewCamera.CFrame = CFrame.lookAt(offset, Vector3.new(0,0,0))
 end
 
--- Render loop untuk auto-rotate
 task.spawn(function()
 	while true do
 		if previewState.active and previewState.autoRotate then
@@ -631,25 +227,23 @@ task.spawn(function()
 	end
 end)
 
--- ============================================================
--- GUI BUILD
--- ============================================================
+-- ====================== GUI ======================
 local ScreenGui = Create("ScreenGui", {
-	Name = "GenImportUI",
+	Name = "ForktAssetManager",
 	ResetOnSpawn = false,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 	DisplayOrder = 999,
 })
 Protect(ScreenGui)
 
--- Logo
+-- ==== FLOATING LOGO BUTTON ====
 local LogoBtn = Create("TextButton", {
 	Name = "LogoBtn",
 	Size = UDim2.new(0, 58, 0, 58),
 	Position = UDim2.new(0, 20, 0.5, -29),
 	BackgroundColor3 = Config.Accent,
-	Text = "GI",
-	TextColor3 = Color3.fromRGB(255, 255, 255),
+	Text = "FK",
+	TextColor3 = Color3.fromRGB(255,255,255),
 	TextSize = 20,
 	Font = Enum.Font.GothamBlack,
 	AutoButtonColor = false,
@@ -675,11 +269,11 @@ task.spawn(function()
 	end
 end)
 
--- Main (dibuat lebih lebar untuk preview panel)
+-- ==== MAIN FRAME ====
 local Main = Create("Frame", {
 	Name = "Main",
-	Size = UDim2.new(0, 900, 0, 500),
-	Position = UDim2.new(0.5, -450, 0.5, -250),
+	Size = UDim2.new(0, 880, 0, 500),
+	Position = UDim2.new(0.5, -440, 0.5, -250),
 	BackgroundColor3 = Config.Bg,
 	BorderSizePixel = 0,
 	Parent = ScreenGui,
@@ -700,7 +294,7 @@ local Glow = Create("ImageLabel", {
 	Parent = Main,
 })
 
--- Sidebar
+-- ==== SIDEBAR ====
 local Sidebar = Create("Frame", {
 	Size = UDim2.new(0, 180, 1, 0),
 	BackgroundColor3 = Config.Sidebar,
@@ -720,7 +314,7 @@ Create("TextLabel", {
 	Size = UDim2.new(1, -20, 0, 62),
 	Position = UDim2.new(0, 12, 0, 10),
 	BackgroundTransparency = 1,
-	Text = "⚡ GEN IMPORT\n" .. Config.Version,
+	Text = "⚡ FORKT ENGINE\n" .. Config.Version,
 	TextColor3 = Config.Text,
 	TextSize = 14,
 	Font = Enum.Font.GothamBlack,
@@ -810,7 +404,7 @@ Create("UIGradient", {
 	Parent = RescanBtn,
 })
 
--- Content (lebih sempit karena ada preview panel)
+-- ==== CONTENT (SPLIT) ====
 local Content = Create("Frame", {
 	Size = UDim2.new(1, -190, 1, -16),
 	Position = UDim2.new(0, 185, 0, 8),
@@ -818,7 +412,6 @@ local Content = Create("Frame", {
 	Parent = Main,
 })
 
--- SPLIT: Left = list pages, Right = preview panel
 local LeftPanel = Create("Frame", {
 	Size = UDim2.new(0.55, -8, 1, 0),
 	Position = UDim2.new(0, 0, 0, 0),
@@ -836,7 +429,7 @@ local RightPanel = Create("Frame", {
 Create("UICorner", {CornerRadius = UDim.new(0, 12), Parent = RightPanel})
 Create("UIStroke", {Color = Config.Accent, Thickness = 1, Transparency = 0.6, Parent = RightPanel})
 
--- Header (di LeftPanel)
+-- Header
 local Header = Create("Frame", {
 	Size = UDim2.new(1, 0, 0, 40),
 	BackgroundTransparency = 1,
@@ -871,14 +464,14 @@ CloseBtn.MouseLeave:Connect(function() Tween(CloseBtn, 0.15, {BackgroundColor3 =
 
 -- Pages
 local Pages = {}
-local function NewPage(name, parent)
+local function NewPage(name)
 	local p = Create("Frame", {
 		Name = name,
 		Size = UDim2.new(1, 0, 1, -40),
 		Position = UDim2.new(0, 0, 0, 40),
 		BackgroundTransparency = 1,
 		Visible = false,
-		Parent = parent or LeftPanel,
+		Parent = LeftPanel,
 	})
 	Pages[name] = p
 	return p
@@ -900,9 +493,7 @@ local function ShowPage(name)
 	end
 end
 
--- ============================================================
--- OVERVIEW PAGE
--- ============================================================
+-- ==== OVERVIEW PAGE ====
 local AvatarCard = Create("Frame", {
 	Size = UDim2.new(1, -10, 0, 130),
 	Position = UDim2.new(0, 0, 0, 10),
@@ -978,13 +569,13 @@ task.spawn(function()
 	UserIdLbl.Text = "UserID: " .. tostring(LocalPlayer.UserId) .. "  •  @" .. LocalPlayer.Name
 end)
 
-local function StatCard(title, x, y, w)
+local function StatCard(title, x, y, w, parent)
 	local card = Create("Frame", {
 		Size = UDim2.new(w, 0, 0, 70),
 		Position = UDim2.new(x, 0, 0, y),
 		BackgroundColor3 = Config.Card,
 		BorderSizePixel = 0,
-		Parent = PageOverview,
+		Parent = parent,
 	})
 	Create("UICorner", {CornerRadius = UDim.new(0, 12), Parent = card})
 	Create("UIGradient", {
@@ -1017,13 +608,11 @@ local function StatCard(title, x, y, w)
 	return val
 end
 
-local OvTotal = StatCard("TOTAL FILES", 0, 150, 0.32)
-local OvModel = StatCard("MODELS", 0.34, 150, 0.32)
-local OvPlace = StatCard("PLACES", 0.68, 150, 0.32)
+local OvTotal = StatCard("TOTAL FILES", 0, 150, 0.32, PageOverview)
+local OvModel = StatCard("MODELS", 0.34, 150, 0.32, PageOverview)
+local OvPlace = StatCard("PLACES", 0.68, 150, 0.32, PageOverview)
 
--- ============================================================
--- ASSETS PAGE
--- ============================================================
+-- ==== ASSETS PAGE ====
 local FilterBar = Create("Frame", {
 	Size = UDim2.new(1, -10, 0, 30),
 	Position = UDim2.new(0, 0, 0, 5),
@@ -1090,9 +679,7 @@ local StatusLbl = Create("TextLabel", {
 	Parent = PageAssets,
 })
 
--- ============================================================
--- SETTINGS PAGE
--- ============================================================
+-- ==== SETTINGS PAGE ====
 local SettingsCard = Create("Frame", {
 	Size = UDim2.new(1, -10, 0, 260),
 	Position = UDim2.new(0, 0, 0, 10),
@@ -1216,7 +803,7 @@ UserInputService.InputEnded:Connect(function(i)
 	end
 end)
 
--- Auto-rotate toggle
+-- Auto Rotate Toggle
 local AutoRotateToggle = Create("TextButton", {
 	Size = UDim2.new(1, -40, 0, 36),
 	Position = UDim2.new(0, 20, 0, 120),
@@ -1236,24 +823,7 @@ AutoRotateToggle.MouseButton1Click:Connect(function()
 	AutoRotateToggle.TextColor3 = previewState.autoRotate and Config.Success or Config.Danger
 end)
 
--- Grid toggle
-local GridToggle = Create("TextButton", {
-	Size = UDim2.new(1, -40, 0, 36),
-	Position = UDim2.new(0, 20, 0, 162),
-	BackgroundColor3 = Color3.fromRGB(35, 35, 48),
-	Text = "▦  Grid Preview: OFF",
-	TextColor3 = Config.Danger,
-	TextSize = 12,
-	Font = Enum.Font.GothamBold,
-	AutoButtonColor = false,
-	TextXAlignment = Enum.TextXAlignment.Left,
-	Parent = SettingsCard,
-})
-Create("UICorner", {CornerRadius = UDim.new(0, 8), Parent = GridToggle})
-
--- ============================================================
--- PREVIEW PANEL
--- ============================================================
+-- ==== PREVIEW PANEL ====
 local PreviewTitle = Create("TextLabel", {
 	Size = UDim2.new(1, -20, 0, 24),
 	Position = UDim2.new(0, 12, 0, 8),
@@ -1290,7 +860,6 @@ local PreviewPlaceholder = Create("TextLabel", {
 	Parent = ViewportFrame,
 })
 
--- Preview controls
 local PreviewName = Create("TextLabel", {
 	Size = UDim2.new(1, -20, 0, 22),
 	Position = UDim2.new(0, 10, 1, -100),
@@ -1316,7 +885,6 @@ local PreviewInfo = Create("TextLabel", {
 	Parent = RightPanel,
 })
 
--- Control buttons row
 local CtrlRow = Create("Frame", {
 	Size = UDim2.new(1, -20, 0, 32),
 	Position = UDim2.new(0, 10, 1, -56),
@@ -1350,7 +918,7 @@ ImportHereBtn.BackgroundColor3 = Config.Accent
 ImportHereBtn.MouseEnter:Connect(function() Tween(ImportHereBtn, 0.15, {BackgroundColor3 = Config.Accent2}) end)
 ImportHereBtn.MouseLeave:Connect(function() Tween(ImportHereBtn, 0.15, {BackgroundColor3 = Config.Accent}) end)
 
--- Preview dragging (orbit)
+-- Preview orbit
 local orbitDragging = false
 local lastMouse
 ViewportFrame.InputBegan:Connect(function(i)
@@ -1374,7 +942,6 @@ UserInputService.InputChanged:Connect(function(i)
 	end
 end)
 
--- Scroll zoom
 UserInputService.InputChanged:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseWheel then
 		local mousePos = UserInputService:GetMouseLocation()
@@ -1409,12 +976,9 @@ local function LoadPreview(asset)
 	currentPreviewAsset = asset
 	PreviewPlaceholder.Visible = false
 
-	-- Clear old
 	pcall(function()
 		for _, c in ipairs(ViewportFrame:GetChildren()) do
-			if c:IsA("Model") or c:IsA("Folder") or c:IsA("BasePart") then
-				c:Destroy()
-			end
+			if c:IsA("Model") or c:IsA("Folder") or c:IsA("BasePart") then c:Destroy() end
 		end
 	end)
 	PreviewSystem.Clear()
@@ -1423,7 +987,7 @@ local function LoadPreview(asset)
 	PreviewInfo.Text = "Loading preview..."
 
 	task.spawn(function()
-		local result, err = PreviewSystem.LoadModel(asset, ViewportFrame)
+		local result, err = PreviewSystem.LoadModel(asset)
 		if not result then
 			PreviewName.Text = "❌ " .. asset.Name
 			PreviewInfo.Text = "Failed: " .. tostring(err)
@@ -1432,11 +996,9 @@ local function LoadPreview(asset)
 			return
 		end
 
-		-- Clone ke viewport
 		local clone = result.model:Clone()
 		clone.Parent = ViewportFrame
 
-		-- Update state
 		previewState.targetSize = math.max(result.maxDim, 1)
 		previewState.distance = 1.8
 		previewState.orbitX = 45
@@ -1444,18 +1006,15 @@ local function LoadPreview(asset)
 		previewState.active = true
 		previewState.viewport = ViewportFrame
 
-		-- Setup camera
 		if previewCamera then
 			pcall(function()
 				previewCamera.Parent = ViewportFrame
 				ViewportFrame.CurrentCamera = previewCamera
 			end)
-			previewCamera.CFrame = CFrame.new(Vector3.new(previewState.distance * previewState.targetSize, previewState.distance * previewState.targetSize * 0.6, previewState.distance * previewState.targetSize), Vector3.new(0, 0, 0))
 		end
 
 		updatePreviewCamera(ViewportFrame)
 
-		-- Count parts
 		local partCount = 0
 		for _, d in ipairs(clone:GetDescendants()) do
 			if d:IsA("BasePart") then partCount += 1 end
@@ -1469,16 +1028,28 @@ end
 
 ImportHereBtn.MouseButton1Click:Connect(function()
 	if not currentPreviewAsset then return end
+	if not Reify then
+		StatusLbl.Text = "Reify belum loaded!"
+		StatusLbl.TextColor3 = Config.Danger
+		return
+	end
 	ImportHereBtn.Text = "..."
 	task.spawn(function()
-		local roots, method = Loader.Import(currentPreviewAsset.Path, workspace)
-		if roots and #roots > 0 then
+		local ok, result = pcall(function()
+			local model = Reify.Load(currentPreviewAsset.Path)
+			if model then
+				model.Parent = workspace
+				return model
+			end
+			error("Reify.Load returned nil")
+		end)
+		if ok and result then
 			ImportHereBtn.Text = "✓ OK"
 			StatusLbl.Text = "✅ Berhasil import: " .. currentPreviewAsset.Name
 			StatusLbl.TextColor3 = Config.Success
 		else
 			ImportHereBtn.Text = "FAIL"
-			StatusLbl.Text = "❌ Gagal: " .. tostring(method)
+			StatusLbl.Text = "❌ Gagal: " .. tostring(result)
 			StatusLbl.TextColor3 = Config.Danger
 		end
 		task.wait(2)
@@ -1486,9 +1057,7 @@ ImportHereBtn.MouseButton1Click:Connect(function()
 	end)
 end)
 
--- ============================================================
--- CARD CREATION
--- ============================================================
+-- ==== CARD CREATION ====
 local function ClearList()
 	for _, c in ipairs(List:GetChildren()) do
 		if c:IsA("Frame") then c:Destroy() end
@@ -1540,14 +1109,13 @@ local function CreateCard(asset, order)
 		Position = UDim2.new(0, 52, 0, 28),
 		BackgroundColor3 = asset.Type == "MODEL" and Color3.fromRGB(40, 120, 80) or Color3.fromRGB(90, 60, 150),
 		Text = asset.Ext:upper(),
-		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextColor3 = Color3.fromRGB(255,255,255),
 		TextSize = 9,
 		Font = Enum.Font.GothamBold,
 		Parent = card,
 	})
 	Create("UICorner", {CornerRadius = UDim.new(0, 4), Parent = tag})
 
-	-- Preview button
 	local prevBtn = Create("TextButton", {
 		Size = UDim2.new(0, 30, 0, 28),
 		Position = UDim2.new(1, -110, 0.5, -14),
@@ -1561,13 +1129,12 @@ local function CreateCard(asset, order)
 	})
 	Create("UICorner", {CornerRadius = UDim.new(0, 6), Parent = prevBtn})
 
-	-- Import button
 	local btn = Create("TextButton", {
 		Size = UDim2.new(0, 70, 0, 28),
 		Position = UDim2.new(1, -76, 0.5, -14),
 		BackgroundColor3 = Config.Accent,
 		Text = "IMPORT",
-		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextColor3 = Color3.fromRGB(255,255,255),
 		TextSize = 11,
 		Font = Enum.Font.GothamBold,
 		AutoButtonColor = false,
@@ -1583,7 +1150,6 @@ local function CreateCard(asset, order)
 		Parent = btn,
 	})
 
-	-- Hover highlight
 	card.MouseEnter:Connect(function()
 		Tween(card, 0.15, {BackgroundColor3 = Color3.fromRGB(38, 38, 52)})
 		Tween(cardStroke, 0.15, {Transparency = 0.5})
@@ -1593,7 +1159,6 @@ local function CreateCard(asset, order)
 		Tween(cardStroke, 0.15, {Transparency = 0.85})
 	end)
 
-	-- Click card to preview
 	card.InputBegan:Connect(function(i)
 		if i.UserInputType == Enum.UserInputType.MouseButton1 then
 			LoadPreview(asset)
@@ -1605,19 +1170,33 @@ local function CreateCard(asset, order)
 	end)
 
 	btn.MouseButton1Click:Connect(function()
+		if not Reify then
+			StatusLbl.Text = "Reify belum loaded!"
+			StatusLbl.TextColor3 = Config.Danger
+			return
+		end
 		btn.Text = "..."
-		StatusLbl.Text = "⏳ Importing: " .. asset.Name
+		StatusLbl.Text = "Importing: " .. asset.Name
 		StatusLbl.TextColor3 = Config.Warn
 		task.spawn(function()
-			local roots, method = Loader.Import(asset.Path, workspace)
-			if roots and #roots > 0 then
+			local ok, result = pcall(function()
+				local model = Reify.Load(asset.Path)
+				if model then
+					model.Parent = workspace
+					return model
+				end
+				error("Reify.Load returned nil")
+			end)
+			if ok and result then
 				btn.Text = "✓ OK"
-				StatusLbl.Text = "✅ Berhasil import: " .. #roots .. " item"
+				StatusLbl.Text = "Berhasil import ke Workspace!"
 				StatusLbl.TextColor3 = Config.Success
+				print("[FORKT IMPORT SUCCESS]", asset.Name)
 			else
 				btn.Text = "FAIL"
-				StatusLbl.Text = "❌ Gagal: " .. tostring(method)
+				StatusLbl.Text = "Gagal: " .. tostring(result)
 				StatusLbl.TextColor3 = Config.Danger
+				warn("[FORKT IMPORT FAIL]", result)
 			end
 			task.wait(2)
 			if btn and btn.Parent then btn.Text = "IMPORT" end
@@ -1625,9 +1204,7 @@ local function CreateCard(asset, order)
 	end)
 end
 
--- ============================================================
--- REFRESH
--- ============================================================
+-- ==== REFRESH ====
 local function Refresh()
 	ClearList()
 	StatusLbl.Text = "Scanning..."
@@ -1640,22 +1217,16 @@ local function Refresh()
 			table.insert(filtered, a)
 		end
 	end
-
 	OvTotal.Text = tostring(#all)
 	OvModel.Text = tostring(modelCount)
 	OvPlace.Text = tostring(placeCount)
-
-	for i, a in ipairs(filtered) do
-		CreateCard(a, i)
-	end
+	for i, a in ipairs(filtered) do CreateCard(a, i) end
 	List.CanvasSize = UDim2.new(0, 0, 0, #filtered * 60 + 10)
-	StatusLbl.Text = #all > 0 and ("✓ " .. #all .. " file ditemukan") or "⚠ Tidak ada file"
+	StatusLbl.Text = #all > 0 and ("✓ " .. #all .. " file ditemukan") or "⚠ Tidak ada file di Workspace"
 	StatusLbl.TextColor3 = #all > 0 and Config.Success or Config.Warn
 end
 
--- ============================================================
--- NAV
--- ============================================================
+-- ==== NAV ====
 BtnOverview.MouseButton1Click:Connect(function()
 	SetActive("overview"); PageTitle.Text = "Overview"; ShowPage("Overview")
 end)
@@ -1671,15 +1242,13 @@ FModel.MouseButton1Click:Connect(function() SetFilter("MODEL"); Refresh() end)
 FPlace.MouseButton1Click:Connect(function() SetFilter("PLACE"); Refresh() end)
 
 RescanBtn.MouseButton1Click:Connect(function()
-	RescanBtn.Text = "⏳ Scanning..."
+	RescanBtn.Text = "Scanning..."
 	Refresh()
 	task.wait(0.4)
 	RescanBtn.Text = "↻  Rescan"
 end)
 
--- ============================================================
--- TOGGLE
--- ============================================================
+-- ==== TOGGLE ====
 local guiOpen = false
 local function OpenGUI()
 	if guiOpen then return end
@@ -1688,8 +1257,8 @@ local function OpenGUI()
 	Main.Size = UDim2.new(0, 700, 0, 400)
 	Main.Position = UDim2.new(0.5, -350, 0.5, -200)
 	Tween(Main, 0.4, {
-		Size = UDim2.new(0, 900, 0, 500),
-		Position = UDim2.new(0.5, -450, 0.5, -250),
+		Size = UDim2.new(0, 880, 0, 500),
+		Position = UDim2.new(0.5, -440, 0.5, -250),
 	}, Enum.EasingStyle.Back)
 	SetActive("overview")
 	PageTitle.Text = "Overview"
@@ -1712,9 +1281,7 @@ LogoBtn.MouseButton1Click:Connect(function()
 end)
 CloseBtn.MouseButton1Click:Connect(CloseGUI)
 
--- ============================================================
--- DRAG
--- ============================================================
+-- ==== DRAG ====
 local dragging, dragStart, startPos
 Header.InputBegan:Connect(function(i)
 	if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
@@ -1755,20 +1322,26 @@ UserInputService.InputEnded:Connect(function(i)
 	end
 end)
 
--- ============================================================
--- CLEANUP on close
--- ============================================================
+-- ==== CLEANUP ====
 ScreenGui.Destroying:Connect(function()
 	pcall(function()
 		if previewWorld then previewWorld:Destroy() end
 	end)
 end)
 
--- ============================================================
--- INIT
--- ============================================================
-StatusLbl.Text = "✓ Preview ready!"
-StatusLbl.TextColor3 = Config.Success
-Refresh()
+-- ==== INIT ====
+StatusLbl.Text = "Loading Reify..."
+task.spawn(function()
+	if LoadReify() then
+		StatusLbl.Text = "✓ Reify loaded — siap import!"
+		StatusLbl.TextColor3 = Config.Success
+		print("[FORKT] Reify loaded successfully")
+	else
+		StatusLbl.Text = "❌ Gagal load Reify (cek internet)"
+		StatusLbl.TextColor3 = Config.Danger
+	end
+	Refresh()
+end)
+
 task.wait(0.3)
 OpenGUI()
